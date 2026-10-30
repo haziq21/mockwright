@@ -23,10 +23,14 @@ export class Mockwright<Deps extends object> {
 
   fixture({ endpoint = "/_mockwright", header = "x-test-id" } = {}): TestFixture<
     MwFor<Deps>,
-    { request: APIRequestContext; context: BrowserContext }
+    {
+      request: APIRequestContext;
+      context: BrowserContext;
+      extraHTTPHeaders: Record<string, string> | undefined;
+    }
   > {
-    return async ({ request, context }, use, { testId }) => {
-      await context.setExtraHTTPHeaders({ [header]: testId });
+    return async ({ request, context, extraHTTPHeaders }, use, { testId }) => {
+      await context.setExtraHTTPHeaders({ ...extraHTTPHeaders, [header]: testId });
 
       const send = async (message: ControlMessage) => {
         const response = await request.post(endpoint, {

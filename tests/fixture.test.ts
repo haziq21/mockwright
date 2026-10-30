@@ -49,7 +49,7 @@ async function run(body: (mw: Mw<typeof mockwright>) => Promise<void>, endpoint?
   const headers: Record<string, string> = {};
   const context = { setExtraHTTPHeaders: async (value: object) => Object.assign(headers, value) };
   await mockwright.fixture(endpoint ? { endpoint } : {})(
-    { request: api, context: context as never },
+    { request: api, context: context as never, extraHTTPHeaders: { "x-config": "1" } },
     body,
     { testId: "t1" } as TestInfo,
   );
@@ -58,7 +58,7 @@ async function run(body: (mw: Mw<typeof mockwright>) => Promise<void>, endpoint?
 
 describe("fixture", () => {
   it("sets test id header", async () => {
-    expect(await run(async () => {})).toEqual({ "x-test-id": "t1" });
+    expect(await run(async () => {})).toEqual({ "x-config": "1", "x-test-id": "t1" });
   });
 
   it("mocks and resets", async () => {
