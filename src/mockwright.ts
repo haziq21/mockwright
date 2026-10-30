@@ -1,25 +1,15 @@
 import type { APIRequestContext, BrowserContext, TestFixture } from "@playwright/test";
-import * as devalue from "devalue";
-import type { HandleResult, MockControlMessage, MwCallable } from "./types";
-import { isBehaviorType, type MockBehaviorType } from "./behavior";
-import { errorTransport, toDevalueFormat, type Transport } from "./transport";
-import { wrapObject } from "./proxy";
-import { Store } from "./store";
-
-type FixtureArgs = { request: APIRequestContext; context: BrowserContext };
+import { behaviors, isBehavior, type Behavior } from "./behavior";
+import { proxy, type Mock } from "./proxy";
+import { codec, type Codec, type Transport } from "./transport";
+import type { ControlMessage, HandleResult, MwFor } from "./types";
 
 export class Mockwright<Deps extends object> {
-  #store = new Store();
-  #reducers: Record<string, (value: any) => unknown>;
-  #revivers: Record<string, (data: any) => unknown>;
+  #codec: Codec;
+  #mocks = new Map<string, Map<string, Mock>>();
 
   constructor(transports: Record<string, Transport> = {}) {
-    // `Error` goes last unless overridden: devalue tries reducers in order, and an earlier `Error`
-    // would swallow custom subclasses.
-    ({ reducers: this.#reducers, revivers: this.#revivers } = toDevalueFormat({
-      ...transports,
-      Error: transports.Error ?? errorTransport,
-    }));
+    this.#codec = codec(transports);
   }
 
   wrap<K extends keyof Deps & string>(
@@ -28,81 +18,69 @@ export class Mockwright<Deps extends object> {
     testId?: string | null,
   ): Deps[K] {
     if (!testId) return dep;
-    return wrapObject(dep, name, testId, this.#store) as Deps[K];
+    return proxy(dep, name, (path) => this.#mocks.get(testId)?.get(path));
   }
 
-  fixture(
-    options: { endpoint?: string; header?: string } = {},
-  ): TestFixture<MwCallable<Deps>, FixtureArgs> {
-    const endpoint = options.endpoint ?? "/_mockwright";
-    const header = options.header ?? "x-test-id";
-    return async ({ request, context }, use, testInfo) => {
-      const testId = testInfo.testId;
+  fixture({ endpoint = "/_mockwright", header = "x-test-id" } = {}): TestFixture<
+    MwFor<Deps>,
+    { request: APIRequestContext; context: BrowserContext }
+  > {
+    return async ({ request, context }, use, { testId }) => {
       await context.setExtraHTTPHeaders({ [header]: testId });
 
-      const send = async (message: MockControlMessage): Promise<void> => {
+      const send = async (message: ControlMessage) => {
         const response = await request.post(endpoint, {
           data: message,
           headers: { [header]: testId },
         });
-        let body: HandleResult | undefined;
-        try {
-          body = (await response.json()) as HandleResult;
-        } catch {
+        const result: HandleResult | null = await response.json().catch(() => {
           throw new Error(`mockwright: ${endpoint} returned non-JSON (${response.status()})`);
-        }
-        if (!body?.ok) throw new Error(`mockwright: ${body?.error ?? response.statusText()}`);
+        });
+        if (!result?.ok) throw new Error(`mockwright: ${result?.error ?? response.statusText()}`);
       };
 
-      await use(this.#client(send));
+      await use((path) => {
+        const set = (behavior: Behavior) => (value: unknown) =>
+          send({ action: "set", path, behavior, value: this.#codec.stringify(value) });
+        return {
+          mockReturnValue: set("return"),
+          mockThrownValue: set("throw"),
+          mockResolvedValue: set("resolve"),
+          mockRejectedValue: set("reject"),
+          mockRestore: () => send({ action: "restore", path }),
+        };
+      });
       await send({ action: "reset" });
     };
   }
 
-  #client(send: (message: MockControlMessage) => Promise<void>): MwCallable<Deps> {
-    const reducers = this.#reducers;
-    return (path) => {
-      const set = (type: MockBehaviorType) => (value: unknown) =>
-        send({ action: "set", key: path, type, value: devalue.stringify(value, reducers) });
-      return {
-        mockReturnValue: set("return"),
-        mockResolvedValue: set("resolve"),
-        mockRejectedValue: set("reject"),
-        mockThrownValue: set("throw"),
-        mockRestore: () => send({ action: "restore", key: path }),
-      };
-    };
-  }
-
-  handle(body: MockControlMessage, testId: string | null | undefined): HandleResult {
+  handle(message: unknown, testId?: string | null): HandleResult {
     if (!testId) return { ok: false, error: "missing test id" };
-    if (!body || typeof body !== "object") return { ok: false, error: "invalid body" };
+    const { action, path, behavior, value } = (message ?? {}) as Record<string, unknown>;
 
-    switch (body.action) {
+    switch (action) {
       case "set": {
-        if (typeof body.key !== "string") return { ok: false, error: "missing key" };
-        if (!isBehaviorType(body.type)) return { ok: false, error: "unknown behavior type" };
-        if (typeof body.value !== "string") return { ok: false, error: "missing value" };
-
-        let value: unknown;
+        if (typeof path !== "string") return { ok: false, error: "missing path" };
+        if (!isBehavior(behavior)) return { ok: false, error: "unknown behavior" };
+        if (typeof value !== "string") return { ok: false, error: "missing value" };
+        let parsed: unknown;
         try {
-          value = devalue.parse(body.value, this.#revivers);
+          parsed = this.#codec.parse(value);
         } catch {
           return { ok: false, error: "unparsable value" };
         }
-
-        this.#store.set(testId, body.key, { type: body.type, value });
+        let mocks = this.#mocks.get(testId);
+        if (!mocks) this.#mocks.set(testId, (mocks = new Map()));
+        mocks.set(path, () => behaviors[behavior](parsed));
         return { ok: true };
       }
-      case "restore": {
-        if (typeof body.key !== "string") return { ok: false, error: "missing key" };
-        this.#store.restore(testId, body.key);
+      case "restore":
+        if (typeof path !== "string") return { ok: false, error: "missing path" };
+        this.#mocks.get(testId)?.delete(path);
         return { ok: true };
-      }
-      case "reset": {
-        this.#store.reset(testId);
+      case "reset":
+        this.#mocks.delete(testId);
         return { ok: true };
-      }
       default:
         return { ok: false, error: "unknown action" };
     }

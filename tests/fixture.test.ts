@@ -1,132 +1,82 @@
-import type { TestInfo } from "@playwright/test";
-import { describe, expect, it } from "vite-plus/test";
-import { Mockwright } from "../src/mockwright";
-import type { MockControlMessage } from "../src/types";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { request, type TestInfo } from "@playwright/test";
+import { afterAll, describe, expect, it } from "vite-plus/test";
+import { Mockwright, type Mw } from "../src";
 
-class PaymentsService {
-  createPaymentIntent(_orderId: string) {
-    return "pi_src_123";
+class PaymentError extends Error {
+  override name = "PaymentError";
+}
+
+class Payments {
+  async charge() {
+    return "real";
   }
 }
 
-interface Deps {
-  payments: PaymentsService;
-}
+const mockwright = new Mockwright<{ payments: Payments }>({
+  PaymentError: {
+    reduce: (value: unknown) => value instanceof PaymentError && value.message,
+    revive: (message: string) => new PaymentError(message),
+  },
+});
+const payments = mockwright.wrap(new Payments(), "payments", "t1");
 
-const mockwright = new Mockwright<Deps>();
-
-type Respond = {
-  ok: () => boolean;
-  json: () => Promise<unknown>;
-  statusText: () => string;
-  status: () => number;
+const routes: Record<string, (body: unknown, testId: string) => [number, string]> = {
+  "/_mockwright": (body, testId) => [200, JSON.stringify(mockwright.handle(body, testId))],
+  "/html": () => [404, "<html>"],
+  "/error": () => [200, JSON.stringify({ ok: false, error: "nope" })],
+  "/empty": () => [400, "{}"],
 };
 
-function fakes(respond: Respond) {
-  const posts: Array<{ url: string; data: unknown; headers: Record<string, string> }> = [];
+const server = createServer(async (req, res) => {
+  let body = "";
+  for await (const chunk of req) body += chunk;
+  const [status, text] = routes[req.url!]!(JSON.parse(body), req.headers["x-test-id"] as string);
+  res.writeHead(status).end(text);
+});
+await new Promise<void>((resolve) => server.listen(0, resolve));
+const api = await request.newContext({
+  baseURL: `http://localhost:${(server.address() as AddressInfo).port}`,
+});
+
+afterAll(async () => {
+  await api.dispose();
+  server.close();
+});
+
+async function run(body: (mw: Mw<typeof mockwright>) => Promise<void>, endpoint?: string) {
   const headers: Record<string, string> = {};
-  const request = {
-    post: async (url: string, options: { data: unknown; headers: Record<string, string> }) => {
-      posts.push({ url, data: options.data, headers: options.headers });
-      return respond;
-    },
-  };
-  const context = {
-    setExtraHTTPHeaders: async (value: Record<string, string>) => {
-      Object.assign(headers, value);
-    },
-  };
-  return { posts, headers, request, context };
+  const context = { setExtraHTTPHeaders: async (value: object) => Object.assign(headers, value) };
+  await mockwright.fixture(endpoint ? { endpoint } : {})(
+    { request: api, context: context as never },
+    body,
+    { testId: "t1" } as TestInfo,
+  );
+  return headers;
 }
-
-const okRespond: Respond = {
-  ok: () => true,
-  json: async () => ({ ok: true }),
-  statusText: () => "OK",
-  status: () => 200,
-};
 
 describe("fixture", () => {
-  it("sets the test id header, sends mocks, and resets", async () => {
-    const { request, context, headers, posts } = fakes(okRespond);
-    const fixture = mockwright.fixture();
-    await fixture(
-      { request: request as never, context: context as never },
-      async (mw) => {
-        expect(headers["x-test-id"]).toBe("t1");
-        await mw("payments.createPaymentIntent").mockReturnValue("pi_test_123");
-      },
-      { testId: "t1" } as TestInfo,
-    );
-    expect(posts).toHaveLength(2);
-    expect(posts[0]?.url).toBe("/_mockwright");
-    expect(posts[0]?.headers["x-test-id"]).toBe("t1");
-    expect((posts[0]?.data as MockControlMessage | undefined)?.action).toBe("set");
-    expect((posts[1]?.data as MockControlMessage | undefined)?.action).toBe("reset");
+  it("sets test id header", async () => {
+    expect(await run(async () => {})).toEqual({ "x-test-id": "t1" });
   });
 
-  it("keeps sending the test-id header on every mock call", async () => {
-    const { request, context, posts } = fakes(okRespond);
-    const fixture = mockwright.fixture();
-    await fixture(
-      { request: request as never, context: context as never },
-      async (mw) => {
-        await mw("payments.createPaymentIntent").mockReturnValue("pi_test_123");
-        await mw("payments.createPaymentIntent").mockRestore();
-      },
-      { testId: "t1" } as TestInfo,
-    );
-    expect(posts).toHaveLength(3);
-    const restore = posts[1]?.data as Extract<MockControlMessage, { action: "restore" }>;
-    expect(restore.action).toBe("restore");
-    expect(restore.key).toBe("payments.createPaymentIntent");
-    expect(posts[1]?.headers["x-test-id"]).toBe("t1");
-  });
-
-  it("fails on ok:false inside a 200 body", async () => {
-    const { request, context } = fakes({
-      ...okRespond,
-      json: async () => ({ ok: false, error: "unknown behavior type" }),
+  it("mocks and resets", async () => {
+    await run(async (mw) => {
+      await mw("payments.charge").mockRejectedValue(new PaymentError("declined"));
+      await expect(payments.charge()).rejects.toThrow(PaymentError);
+      await mw("payments.charge").mockRestore();
+      await expect(payments.charge()).resolves.toBe("real");
+      await mw("payments.charge").mockResolvedValue("mocked");
     });
-    const fixture = mockwright.fixture();
-    await expect(
-      fixture(
-        { request: request as never, context: context as never },
-        async (mw) => {
-          await mw("payments.createPaymentIntent").mockReturnValue("pi_test_123");
-        },
-        { testId: "t1" } as TestInfo,
-      ),
-    ).rejects.toThrow("mockwright: unknown behavior type");
+    await expect(payments.charge()).resolves.toBe("real");
   });
 
-  it("fails on non-JSON bodies, stating the endpoint and status", async () => {
-    const { request, context } = fakes({
-      ...okRespond,
-      ok: () => false,
-      status: () => 404,
-      json: async () => JSON.parse("<html>Not Found</html>"),
-    });
-    const fixture = mockwright.fixture();
-    await expect(
-      fixture({ request: request as never, context: context as never }, async () => {}, {
-        testId: "t1",
-      } as TestInfo),
-    ).rejects.toThrow("mockwright: /_mockwright returned non-JSON (404)");
-  });
-
-  it("falls back to the status text when a failing body has no error", async () => {
-    const { request, context } = fakes({
-      ...okRespond,
-      ok: () => false,
-      statusText: () => "Bad Request",
-      json: async () => ({}),
-    });
-    const fixture = mockwright.fixture();
-    await expect(
-      fixture({ request: request as never, context: context as never }, async () => {}, {
-        testId: "t1",
-      } as TestInfo),
-    ).rejects.toThrow("mockwright: Bad Request");
+  it.each([
+    ["/html", "mockwright: /html returned non-JSON (404)"],
+    ["/error", "mockwright: nope"],
+    ["/empty", "mockwright: Bad Request"],
+  ])("fails on %s", async (endpoint, error) => {
+    await expect(run(async () => {}, endpoint)).rejects.toThrow(error);
   });
 });

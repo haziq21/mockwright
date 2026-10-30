@@ -1,38 +1,37 @@
+import * as devalue from "devalue";
+
 export interface Transport {
   reduce(value: unknown): unknown;
   revive(data: any): unknown;
 }
 
-export const errorTransport: Transport = {
+const errorTransport: Transport = {
   reduce(value) {
     if (!(value instanceof Error)) return false;
     const { name, message, stack, cause, ...extras } = value;
     return [name, message, stack, cause, extras];
   },
-  revive([name, message, stack, cause, extras]: [
-    string,
-    string,
-    string | undefined,
-    unknown,
-    object,
-  ]) {
-    const error = Object.assign(
-      cause === undefined ? new Error(message) : new Error(message, { cause }),
-      extras,
-      { name },
-    );
+  revive([name, message, stack, cause, extras]: [string, string, string?, unknown?, object?]) {
+    const error = new Error(message, cause === undefined ? undefined : { cause });
+    Object.assign(error, extras, { name });
     if (stack !== undefined) error.stack = stack;
     return error;
   },
 };
 
-export function toDevalueFormat(transports: Record<string, Transport>) {
-  const reducers: Record<string, (value: any) => unknown> = {};
-  const revivers: Record<string, (data: any) => unknown> = {};
-  for (const [name, transport] of Object.entries(transports)) {
-    // Wrap the functions to maintain `this`
-    reducers[name] = (value) => transport.reduce(value);
-    revivers[name] = (data) => transport.revive(data);
-  }
-  return { reducers, revivers };
+export type Codec = ReturnType<typeof codec>;
+
+export function codec(transports: Record<string, Transport>) {
+  // devalue tries reducers in order, so `Error` must come after its subclasses.
+  const entries = Object.entries({ ...transports, Error: transports.Error ?? errorTransport });
+  const reducers = Object.fromEntries(
+    entries.map(([name, transport]) => [name, (value: unknown) => transport.reduce(value)]),
+  );
+  const revivers = Object.fromEntries(
+    entries.map(([name, transport]) => [name, (data: unknown) => transport.revive(data)]),
+  );
+  return {
+    stringify: (value: unknown) => devalue.stringify(value, reducers),
+    parse: (text: string): unknown => devalue.parse(text, revivers),
+  };
 }

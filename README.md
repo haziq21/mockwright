@@ -91,6 +91,7 @@ Supported `mw(...)` methods:
 - `mockResolvedValue(value)`
 - `mockThrownValue(value)`
 - `mockRejectedValue(value)`
+- `mockRestore()`
 
 Fixture behaviours are reset after each test. Note that `mw(...)` can be used in `test.beforeEach()` but not `test.beforeAll()`, since Mockwright needs `testInfo.testId`.
 

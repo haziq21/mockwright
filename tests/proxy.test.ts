@@ -1,162 +1,120 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import type { MockBehavior } from "../src/behavior";
-import { Store } from "../src/store";
-import { wrapObject } from "../src/proxy";
+import { proxy, type Mock } from "../src/proxy";
 
-let store: Store;
+let mocks: Map<string, Mock>;
 beforeEach(() => {
-  store = new Store();
+  mocks = new Map();
 });
 
-const behavior = (value: unknown): MockBehavior => ({ type: "return", value });
+const mock = (path: string, value: unknown) => mocks.set(path, () => value);
+const wrap = <T extends object>(dep: T) => proxy(dep, "dep", (path) => mocks.get(path));
 
 class Customers {
   retrieve() {
-    return "cus_src_ok";
+    return "real";
   }
 }
 
-class PaymentsService {
+class Service {
   customers = new Customers();
-  createPaymentIntent(this: void) {
-    return "pi_src_ok";
-  }
-  async createPaymentIntentAsync() {
-    return "pi_src_async";
+  create(this: void) {
+    return "real";
   }
 }
 
-describe("wrapObject", () => {
-  it("derives dotted keys and delivers mocked values", () => {
-    store.set("t", "payments.createPaymentIntent", behavior("pi_test_ok"));
-    const wrapped = wrapObject(new PaymentsService(), "payments", "t", store);
-    expect(wrapped.createPaymentIntent()).toBe("pi_test_ok");
+describe("proxy", () => {
+  it("mocks methods", () => {
+    mock("dep.create", "mocked");
+    expect(wrap(new Service()).create()).toBe("mocked");
   });
 
-  it("passes through to the real method when unmocked", () => {
-    const wrapped = wrapObject(new PaymentsService(), "payments", "t", store);
-    expect(wrapped.createPaymentIntent()).toBe("pi_src_ok");
+  it("passes through", () => {
+    expect(wrap(new Service()).create()).toBe("real");
   });
 
-  it("traverses nested namespaces", () => {
-    store.set("t", "payments.customers.retrieve", behavior("cus_test_ok"));
-    const wrapped = wrapObject(new PaymentsService(), "payments", "t", store);
-    expect(wrapped.customers.retrieve()).toBe("cus_test_ok");
+  it("mocks nested methods", () => {
+    mock("dep.customers.retrieve", "mocked");
+    expect(wrap(new Service()).customers.retrieve()).toBe("mocked");
   });
 
-  it("delivers async behaviors", async () => {
-    store.set("t", "payments.createPaymentIntentAsync", {
-      type: "resolve",
-      value: "pi_test_async",
-    });
-    const wrapped = wrapObject(new PaymentsService(), "payments", "t", store);
-    await expect(wrapped.createPaymentIntentAsync()).resolves.toBe("pi_test_async");
+  it("mocks namespaces", () => {
+    const service = wrap(new Service());
+    void service.customers;
+    mock("dep.customers", { retrieve: () => "mocked" });
+    expect(service.customers.retrieve()).toBe("mocked");
   });
 
-  it("keeps identity stable per property", () => {
-    const wrapped = wrapObject(new PaymentsService(), "payments", "t", store);
-    expect(wrapped.customers).toBe(wrapped.customers);
-    expect(wrapped.createPaymentIntent).toBe(wrapped.createPaymentIntent);
+  it("keeps identity", () => {
+    const service = wrap(new Service());
+    expect(service.customers).toBe(service.customers);
+    expect(service.create).toBe(service.create);
   });
 
-  it("does not invoke a getter when it is mocked", () => {
-    const spy = vi.fn(() => "real-getter");
-    class WithGetter {
-      get thing() {
-        return spy();
-      }
-    }
-    store.set("t", "payments.thing", behavior("pi_test_getter"));
-    const wrapped = wrapObject(new WithGetter(), "payments", "t", store);
-    expect(wrapped.thing).toBe("pi_test_getter");
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it("invokes an unmocked getter and returns its value unwrapped", () => {
-    const deep = { nested: () => "real-nested" };
-    class WithGetter {
-      get thing() {
-        return deep;
-      }
-    }
-    const wrapped = wrapObject(new WithGetter(), "payments", "t", store);
-    expect(wrapped.thing).toBe(deep);
-  });
-
-  it("treats promise-valued properties as leaves", () => {
-    class WithPromise {
-      charge = Promise.resolve("real");
-    }
-    const dep = new WithPromise();
-    const wrapped = wrapObject(dep, "payments", "t", store);
-    expect(wrapped.charge).toBe(dep.charge);
-  });
-
-  it("passes symbols through unwrapped", () => {
-    const iterator = () => "iter";
-    class WithSymbol {
-      [Symbol.iterator] = iterator;
-    }
-    const dep = new WithSymbol();
-    const wrapped = wrapObject(dep, "payments", "t", store);
-    expect(wrapped[Symbol.iterator]).toBe(iterator);
-  });
-
-  it("short-circuits a namespace when a behavior exists at its path", () => {
-    const replacement = { retrieve: () => "customers_test_mocked" };
-    store.set("t", "payments.customers", behavior(replacement));
-    const wrapped = wrapObject(new PaymentsService(), "payments", "t", store);
-    expect(wrapped.customers.retrieve()).toBe("customers_test_mocked");
-  });
-
-  it("does not wrap return values", () => {
-    const returned = { intentId: "pi_x" };
-    class WithReturn {
-      get() {
-        return returned;
-      }
-    }
-    const wrapped = wrapObject(new WithReturn(), "payments", "t", store);
-    expect(wrapped.get()).toBe(returned);
-  });
-
-  it("applies a mock set after a namespace was first read", () => {
-    const wrapped = wrapObject(new PaymentsService(), "payments", "t", store);
+  it("follows reassignment", () => {
+    const service = new Service();
+    const wrapped = wrap(service);
     void wrapped.customers;
-    const replacement = { retrieve: () => "customers_test_mocked" };
-    store.set("t", "payments.customers", behavior(replacement));
-    expect(wrapped.customers.retrieve()).toBe("customers_test_mocked");
+    service.customers = { retrieve: () => "next" };
+    expect(wrapped.customers.retrieve()).toBe("next");
   });
 
-  it("follows a property that is reassigned on the dependency", () => {
-    const dep = new PaymentsService();
-    const wrapped = wrapObject(dep, "payments", "t", store);
-    void wrapped.customers;
-    const next = new Customers();
-    next.retrieve = () => "cus_next";
-    dep.customers = next;
-    expect(wrapped.customers.retrieve()).toBe("cus_next");
+  it("skips mocked getters", () => {
+    const getter = vi.fn();
+    mock("dep.value", "mocked");
+    expect(
+      wrap({
+        get value() {
+          return getter();
+        },
+      }).value,
+    ).toBe("mocked");
+    expect(getter).not.toHaveBeenCalled();
   });
 
-  it("runs getters against the real target", () => {
-    class WithPrivate {
-      #id = "cus_private";
+  it("leaves getter values unwrapped", () => {
+    const value = {};
+    expect(
+      wrap({
+        get value() {
+          return value;
+        },
+      }).value,
+    ).toBe(value);
+  });
+
+  it("runs getters on target", () => {
+    class Private {
+      #id = "id";
       map = new Map([[1, 2]]);
       get id() {
         return this.#id;
       }
     }
-    const wrapped = wrapObject(new WithPrivate(), "payments", "t", store);
-    expect(wrapped.id).toBe("cus_private");
+    const wrapped = wrap(new Private());
+    expect(wrapped.id).toBe("id");
     expect(wrapped.map.size).toBe(1);
   });
 
-  it("preserves own properties and constructability of function dependencies", () => {
+  it("leaves promises, symbols and return values unwrapped", () => {
+    const value = {};
+    const dep = { promise: Promise.resolve(), [Symbol.iterator]: () => value, get: () => value };
+    const wrapped = wrap(dep);
+    expect(wrapped.promise).toBe(dep.promise);
+    expect(wrapped[Symbol.iterator]).toBe(dep[Symbol.iterator]);
+    expect(wrapped.get()).toBe(value);
+  });
+
+  it("mocks functions", () => {
+    mock("dep", "mocked");
+    expect(wrap(() => "real")()).toBe("mocked");
+  });
+
+  it("keeps function properties and construction", () => {
     function Sender(this: { id?: string }) {
       this.id = "made";
     }
     Sender.retry = () => "retried";
-    const wrapped = wrapObject(Sender, "send", "t", store);
+    const wrapped = wrap(Sender);
     expect(wrapped.retry()).toBe("retried");
     expect(new (wrapped as unknown as new () => { id: string })().id).toBe("made");
   });

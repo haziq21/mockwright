@@ -1,26 +1,26 @@
-import type { MockBehaviorType } from "./behavior";
+import type { Behavior } from "./behavior";
 import type { Mockwright } from "./mockwright";
 
-export type MockControlMessage =
-  | { action: "set"; key: string; type: MockBehaviorType; value: string }
-  | { action: "restore"; key: string }
+export type ControlMessage =
+  | { action: "set"; path: string; behavior: Behavior; value: string }
+  | { action: "restore"; path: string }
   | { action: "reset" };
 
 export type HandleResult = { ok: true } | { ok: false; error: string };
 
-type Prev = [never, 0, 1, 2, 3, 4, 5, 6, 7];
-
-export type Paths<T, D extends number = 5> = D extends never
+export type Paths<T, Depth extends unknown[] = []> = Depth["length"] extends 5
   ? never
   : {
-      [K in keyof T & string]: T[K] extends Function | Promise<any>
-        ? K
-        : T[K] extends object
-          ? K | `${K}.${Paths<T[K], Prev[D]>}`
-          : K;
+      [K in keyof T & string]:
+        | K
+        | (T[K] extends Function | Promise<unknown>
+            ? never
+            : T[K] extends object
+              ? `${K}.${Paths<T[K], [...Depth, unknown]>}`
+              : never);
     }[keyof T & string];
 
-export type PathValue<T, P extends string> = P extends `${infer K}.${infer Rest}`
+type PathValue<T, P extends string> = P extends `${infer K}.${infer Rest}`
   ? K extends keyof T
     ? PathValue<T[K], Rest>
     : never
@@ -39,6 +39,6 @@ export interface MockHandle<T, P extends string> {
   mockRestore(): Promise<void>;
 }
 
-export type MwCallable<D extends object> = <P extends Paths<D>>(path: P) => MockHandle<D, P>;
+export type MwFor<Deps> = <P extends Paths<Deps>>(path: P) => MockHandle<Deps, P>;
 
-export type Mw<W extends Mockwright<any>> = W extends Mockwright<infer D> ? MwCallable<D> : never;
+export type Mw<W extends Mockwright<any>> = W extends Mockwright<infer Deps> ? MwFor<Deps> : never;

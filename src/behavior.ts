@@ -1,4 +1,4 @@
-const DELIVER = {
+export const behaviors = {
   return: (value: unknown) => value,
   throw: (value: unknown) => {
     throw value;
@@ -7,17 +7,8 @@ const DELIVER = {
   reject: (value: unknown) => Promise.reject(value),
 };
 
-export type MockBehaviorType = keyof typeof DELIVER;
+export type Behavior = keyof typeof behaviors;
 
-export interface MockBehavior {
-  type: MockBehaviorType;
-  value: unknown;
-}
-
-export function isBehaviorType(type: unknown): type is MockBehaviorType {
-  return typeof type === "string" && Object.hasOwn(DELIVER, type);
-}
-
-export function deliver({ type, value }: MockBehavior): unknown {
-  return DELIVER[type](value);
+export function isBehavior(value: unknown): value is Behavior {
+  return typeof value === "string" && Object.hasOwn(behaviors, value);
 }

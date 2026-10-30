@@ -1,27 +1,17 @@
 {
   "name": "mockwright",
   "version": "0.0.1",
+  "description": "Server-side mocking for Playwright tests.",
   "license": "MIT",
+  "repository": "github:haziq21/mockwright",
   "files": [
     "dist"
   ],
   "type": "module",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
+  "exports": "./dist/index.mjs",
   "scripts": {
-    "build": "vp pack",
-    "test": "vp test run",
-    "test:watch": "vp test",
-    "typecheck": "tsc --noEmit",
     "prepare": "vp config",
-    "prepack": "vp pack",
-    "changeset": "changeset",
-    "changeset:version": "changeset version",
-    "changeset:publish": "changeset publish"
+    "prepack": "vp pack"
   },
   "dependencies": {
     "devalue": "^5.9.2"
@@ -31,8 +21,7 @@
     "@playwright/test": "^1.49.0",
     "@types/node": "^22.0.0",
     "typescript": "^5.9.3",
-    "vite-plus": "catalog:",
-    "vitest": "catalog:"
+    "vite-plus": "catalog:"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.40.0"
@@ -41,5 +30,6 @@
     "@playwright/test": {
       "optional": true
     }
-  }
+  },
+  "packageManager": "pnpm@10.28.0"
 }
